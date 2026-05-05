@@ -3,8 +3,6 @@
 Falcon-EYE is a personal project focused on implementing core algorithms for
 vision-based navigation, tracking, and simulation in UAV (drone) systems.
 
-The goal is to build a complete perception and estimation pipeline,
-from low-level vision to motion estimation and simulation.
 
 ---
 
@@ -36,8 +34,9 @@ Instead of building AirSim, you can use a prebuilt environment:
 
 This launches a ready-to-use 3D simulation with a drone.
 
-```bash
+
 clone this repository : 
+```bash
 git clone https://github.com/microsoft/AirSim.git
 cd AirSim/PythonClient/multirotor 
 python hello_drone.py
