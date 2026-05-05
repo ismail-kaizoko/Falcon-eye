@@ -1,6 +1,8 @@
 import cv2
 import numpy as np
 import glob
+import matplotlib.pyplot as plt
+
 
 
 # Load two consecutive frames
@@ -175,7 +177,6 @@ def rotation_to_euler(R):
 
 
 output_frames = []
-import matplotlib.pyplot as plt
 
 
 plt.ion()  # interactive mode
