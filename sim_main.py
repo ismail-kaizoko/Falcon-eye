@@ -2,7 +2,7 @@
 import airsim
 import numpy as np
 import cv2
-from algos import optical_flow
+from algos.optical_flow import *
 
 
 client = airsim.MultirotorClient()
@@ -49,7 +49,7 @@ for i in range(50):
 
 
 #Plug into your VO pipeline
-R, t = estimate_motion(frames[i], frames[i+1])
+R, t = estimate_Rt(frames[i], frames[i+1])
 
 
 
