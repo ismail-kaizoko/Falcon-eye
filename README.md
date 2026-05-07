@@ -16,6 +16,9 @@ vision-based navigation, tracking, and simulation in UAV (drone) systems.
 
 All algorithms are tested inside **AirSim**, a high-fidelity drone simulator from Microsoft.
 
+This branch also includes an interactive AirSim drone game mode with keyboard
+movement and a live camera window. See `docs/DRONE_GAME.md`.
+
 
 
 ### 1. Install Unreal Engine
