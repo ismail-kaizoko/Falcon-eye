@@ -2,64 +2,65 @@
 import airsim
 import numpy as np
 import cv2
+from matplotlib import pyplot as plt
 from algos.optical_flow import *
+from skimage.io import imsave
 
 
 client = airsim.MultirotorClient()
 client.confirmConnection()
+client.enableApiControl(True)
+client.armDisarm(True)
+client.takeoffAsync().join()
 
-response = client.simGetImages([airsim.ImageRequest("0", airsim.ImageType.Scene, False, False)])[0]
 
-img1d = np.frombuffer(response.image_data_uint8, dtype=np.uint8)
-img = img1d.reshape(response.height, response.width, 3)
-
-cv2.imshow("AirSim Image", img)
-cv2.waitKey(0)
+print("Connected and flying!")
 
 
 
+# add command to return drone to square-0
+client.rotateToYawAsync(0).join()
+client.moveToPositionAsync(0,0,0,5).join()
 
-#Get IMU data (VERY IMPORTANT for you)
-imu = client.getImuData()
-
-print("Angular velocity:", imu.angular_velocity)
-print("Linear acceleration:", imu.linear_acceleration)
+print("setup finished")
 
 
 
 
-#Move the drone (generate your dataset)
-client.moveByVelocityAsync(1, 0, 0, 2).join()  # forward
 
+#record full rotation : 
+step = 10
 
-frames = []
-
-for i in range(50):
-    client.moveByVelocityAsync(1, 0, 0, 0.1).join()
-
-    response = client.simGetImages([
-        airsim.ImageRequest("0", airsim.ImageType.Scene, False, False)
-    ])[0]
-
-    img = np.frombuffer(response.image_data_uint8, dtype=np.uint8)
-    img = img.reshape(response.height, response.width, 3)
-
-    frames.append(img)
+for i in range(9) :
+    deg = i*step
+    client.rotateToYawAsync(deg).join()
+    print(f"moved by {step}")
+    response = client.simGetImages([airsim.ImageRequest("0", airsim.ImageType.Scene, False, False)])[0]
+    img1d = np.frombuffer(response.image_data_uint8, dtype=np.uint8)
+    img = img1d.reshape(response.height, response.width, 3)
+    imsave(f'data/rot{deg}.png', img)
 
 
 
-#Plug into your VO pipeline
-R, t = estimate_Rt(frames[i], frames[i+1])
+
+
+# stream_frames(rot_frames)
+print("rotation finished")
+
+
+#record x-translation :
+n = 5
+step = 1
+for i in range(n*step):
+    client.moveByVelocityAsync(0, 2, 0, 1).join()  # forward
+    response = client.simGetImages([airsim.ImageRequest("0", airsim.ImageType.Scene, False, False)])[0]
+
+    img1d = np.frombuffer(response.image_data_uint8, dtype=np.uint8)
+    img = img1d.reshape(response.height, response.width, 3)
+    imsave(f'data/x-transl{i*step}.png', img)
 
 
 
-#Ground truth (THIS IS GOLD)
-state = client.getMultirotorState()
+# stream_frames(forward_frames)
 
-pos = state.kinematics_estimated.position
-ori = state.kinematics_estimated.orientation
-
-#Ground truth (THIS IS GOLD)
-info = client.simGetCameraInfo("0")
-
-K = np.array(info.proj_mat.matrix).reshape(4,4)
+print("translation finished")
