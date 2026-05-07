@@ -1,2 +1,18 @@
-useless/
+#Folders
+donotpush/
+data/
 
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# VSCode
+.vscode/
+
+# AirSim recordings
+*.log

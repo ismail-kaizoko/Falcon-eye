@@ -35,19 +35,23 @@ Instead of building AirSim, you can use a prebuilt environment:
 This launches a ready-to-use 3D simulation with a drone.
 
 
-clone this repository : 
+clone The AirsSim repository from microsoft repo : 
 ```bash
 git clone https://github.com/microsoft/AirSim.git
 cd AirSim/PythonClient/multirotor 
 python hello_drone.py
 ```
 
-AirSim dependencies may conflict with your system packages.
-Use a virtual environment:
+
+## Clone and Setup
+AirSim dependencies may conflict with your system packages, we recommend using python env : 
 
 ```bash
-python -m venv airsim_env 
-airsim_env\Scripts\activate 
-# install the minimal packages usefull for the demo
-pip install numpy opencv-python msgpack-rpc-python
+git clone <repo>
+cd Falcon-eye
+
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+pip install -r requirements.txt
 ```
