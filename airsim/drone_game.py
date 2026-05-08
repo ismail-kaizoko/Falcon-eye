@@ -30,16 +30,30 @@ from drone_game_config import (
     CAMERA_NAME,
     COMMAND_DURATION_SECONDS,
     COMMAND_HZ,
+    DISPLAY_IMU_OVERLAY,
     DISPLAY_STATUS_OVERLAY,
     FAST_MULTIPLIER,
     FORWARD_SPEED_MPS,
     HOVER_ON_EXIT,
+    KEY_BACKWARD,
+    KEY_DOWN,
+    KEY_FAST,
+    KEY_FORWARD,
+    KEY_HOVER,
+    KEY_LAND,
+    KEY_STRAFE_LEFT,
+    KEY_STRAFE_RIGHT,
+    KEY_TAKEOFF,
+    KEY_UP,
+    KEY_YAW_LEFT,
+    KEY_YAW_RIGHT,
     LAND_ON_EXIT,
     MAX_ALTITUDE_UP_METERS,
     MIN_ALTITUDE_UP_METERS,
     STRAFE_SPEED_MPS,
     STREAM_FPS,
     TAKEOFF_TIMEOUT_SECONDS,
+    TELEMETRY_HZ,
     VEHICLE_NAME,
     VERTICAL_SPEED_MPS,
     WINDOW_NAME,
@@ -48,7 +62,7 @@ from drone_game_config import (
 
 
 KEY_HELP = (
-    "W/S forward/back | A/D strafe | Space/Ctrl up/down | Q/E yaw | "
+    "Z/S forward/back | Q/D strafe | Space/Ctrl up/down | A/E yaw | "
     "Shift fast | H hover | L land | T takeoff | Esc quit"
 )
 
@@ -76,6 +90,38 @@ class KeyboardState:
     def request_stop(self) -> None:
         with self.lock:
             self.stop_requested = True
+
+
+@dataclass
+class TelemetryState:
+    linear_acceleration: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    angular_acceleration: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    angular_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    updated_at: float = 0.0
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def update(
+        self,
+        linear_acceleration: tuple[float, float, float],
+        angular_velocity: tuple[float, float, float],
+        angular_acceleration: tuple[float, float, float],
+    ) -> None:
+        with self.lock:
+            self.linear_acceleration = linear_acceleration
+            self.angular_velocity = angular_velocity
+            self.angular_acceleration = angular_acceleration
+            self.updated_at = time.perf_counter()
+
+    def snapshot(
+        self,
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float], float]:
+        with self.lock:
+            return (
+                self.linear_acceleration,
+                self.angular_velocity,
+                self.angular_acceleration,
+                self.updated_at,
+            )
 
 
 def normalize_key(key: keyboard.Key | keyboard.KeyCode) -> str | None:
@@ -135,6 +181,9 @@ def control_loop(
 ) -> None:
     period = 1.0 / COMMAND_HZ
     last_discrete_action = 0.0
+    last_command_was_zero = False
+    last_altitude_check = 0.0
+    altitude = 0.0
 
     while not stop_event.is_set():
         start = time.perf_counter()
@@ -143,30 +192,38 @@ def control_loop(
             stop_event.set()
             break
 
-        if "t" in pressed and start - last_discrete_action > 0.8:
+        if KEY_TAKEOFF in pressed and start - last_discrete_action > 0.8:
             client.takeoffAsync(timeout_sec=TAKEOFF_TIMEOUT_SECONDS, vehicle_name=VEHICLE_NAME).join()
             last_discrete_action = start
             continue
-        elif "l" in pressed and start - last_discrete_action > 0.8:
+        elif KEY_LAND in pressed and start - last_discrete_action > 0.8:
             client.landAsync(vehicle_name=VEHICLE_NAME).join()
             last_discrete_action = start
             continue
-        elif "h" in pressed and start - last_discrete_action > 0.4:
+        elif KEY_HOVER in pressed and start - last_discrete_action > 0.4:
             client.hoverAsync(vehicle_name=VEHICLE_NAME).join()
             last_discrete_action = start
             continue
 
-        speed_multiplier = FAST_MULTIPLIER if "shift" in pressed else 1.0
-        vx = axis(pressed, positive="w", negative="s") * FORWARD_SPEED_MPS * speed_multiplier
-        vy = axis(pressed, positive="d", negative="a") * STRAFE_SPEED_MPS * speed_multiplier
-        vz = axis(pressed, positive="ctrl", negative="space") * VERTICAL_SPEED_MPS
-        yaw_rate = axis(pressed, positive="e", negative="q") * YAW_RATE_DEG_PER_SEC * speed_multiplier
+        speed_multiplier = FAST_MULTIPLIER if KEY_FAST in pressed else 1.0
+        vx = axis(pressed, positive=KEY_FORWARD, negative=KEY_BACKWARD) * FORWARD_SPEED_MPS * speed_multiplier
+        vy = axis(pressed, positive=KEY_STRAFE_RIGHT, negative=KEY_STRAFE_LEFT) * STRAFE_SPEED_MPS * speed_multiplier
+        vz = axis(pressed, positive=KEY_DOWN, negative=KEY_UP) * VERTICAL_SPEED_MPS
+        yaw_rate = axis(pressed, positive=KEY_YAW_RIGHT, negative=KEY_YAW_LEFT) * YAW_RATE_DEG_PER_SEC * speed_multiplier
 
-        altitude = current_altitude_up(client)
-        if altitude >= MAX_ALTITUDE_UP_METERS and vz < 0:
-            vz = 0.0
-        if altitude <= MIN_ALTITUDE_UP_METERS and vz > 0:
-            vz = 0.0
+        if vz != 0.0 and start - last_altitude_check > 0.25:
+            altitude = current_altitude_up(client)
+            last_altitude_check = start
+            if altitude >= MAX_ALTITUDE_UP_METERS and vz < 0:
+                vz = 0.0
+            if altitude <= MIN_ALTITUDE_UP_METERS and vz > 0:
+                vz = 0.0
+
+        command_is_zero = vx == 0.0 and vy == 0.0 and vz == 0.0 and yaw_rate == 0.0
+        if command_is_zero and last_command_was_zero:
+            elapsed = time.perf_counter() - start
+            time.sleep(max(0.0, period - elapsed))
+            continue
 
         client.moveByVelocityBodyFrameAsync(
             vx,
@@ -176,7 +233,48 @@ def control_loop(
             drivetrain=airsim.DrivetrainType.MaxDegreeOfFreedom,
             yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=yaw_rate),
             vehicle_name=VEHICLE_NAME,
-        )
+        ).join()
+        last_command_was_zero = command_is_zero
+
+        elapsed = time.perf_counter() - start
+        time.sleep(max(0.0, period - elapsed))
+
+
+def vector_to_tuple(vector: object) -> tuple[float, float, float]:
+    return (
+        float(vector.x_val),
+        float(vector.y_val),
+        float(vector.z_val),
+    )
+
+
+def telemetry_loop(
+    client: airsim.MultirotorClient,
+    telemetry: TelemetryState,
+    stop_event: threading.Event,
+) -> None:
+    period = 1.0 / TELEMETRY_HZ
+    previous_angular_velocity: tuple[float, float, float] | None = None
+    previous_time: float | None = None
+
+    while not stop_event.is_set():
+        start = time.perf_counter()
+        imu = client.getImuData(vehicle_name=VEHICLE_NAME)
+        linear_acceleration = vector_to_tuple(imu.linear_acceleration)
+        angular_velocity = vector_to_tuple(imu.angular_velocity)
+
+        if previous_angular_velocity is None or previous_time is None:
+            angular_acceleration = (0.0, 0.0, 0.0)
+        else:
+            dt = max(1e-6, start - previous_time)
+            angular_acceleration = tuple(
+                (current - previous) / dt
+                for current, previous in zip(angular_velocity, previous_angular_velocity)
+            )
+
+        telemetry.update(linear_acceleration, angular_velocity, angular_acceleration)
+        previous_angular_velocity = angular_velocity
+        previous_time = start
 
         elapsed = time.perf_counter() - start
         time.sleep(max(0.0, period - elapsed))
@@ -191,7 +289,11 @@ def frame_from_response(response: airsim.ImageResponse) -> np.ndarray | None:
     return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
 
-def draw_overlay(frame: np.ndarray, fps: float, keys: Set[str]) -> None:
+def format_vector(values: tuple[float, float, float], unit: str) -> str:
+    return f"x {values[0]: .2f} y {values[1]: .2f} z {values[2]: .2f} {unit}"
+
+
+def draw_overlay(frame: np.ndarray, fps: float, keys: Set[str], telemetry: TelemetryState) -> None:
     if not DISPLAY_STATUS_OVERLAY:
         return
 
@@ -205,6 +307,7 @@ def draw_overlay(frame: np.ndarray, fps: float, keys: Set[str]) -> None:
         1,
         cv2.LINE_AA,
     )
+
     cv2.putText(
         frame,
         f"stream {fps:4.1f} fps | keys: {' '.join(sorted(keys))}",
@@ -216,10 +319,47 @@ def draw_overlay(frame: np.ndarray, fps: float, keys: Set[str]) -> None:
         cv2.LINE_AA,
     )
 
+    if not DISPLAY_IMU_OVERLAY:
+        return
+
+    linear_acceleration, angular_velocity, angular_acceleration, updated_at = telemetry.snapshot()
+    age = time.perf_counter() - updated_at if updated_at else 0.0
+    cv2.putText(
+        frame,
+        "lin acc  " + format_vector(linear_acceleration, "m/s2"),
+        (12, 78),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.52,
+        (255, 225, 110),
+        1,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        frame,
+        "ang acc  " + format_vector(angular_acceleration, "rad/s2"),
+        (12, 104),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.52,
+        (255, 225, 110),
+        1,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        frame,
+        "gyro     " + format_vector(angular_velocity, f"rad/s {age:0.1f}s"),
+        (12, 130),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.52,
+        (255, 225, 110),
+        1,
+        cv2.LINE_AA,
+    )
+
 
 def stream_loop(
     client: airsim.MultirotorClient,
     keys: KeyboardState,
+    telemetry: TelemetryState,
     stop_event: threading.Event,
 ) -> None:
     image_type = airsim_image_type()
@@ -247,7 +387,7 @@ def stream_loop(
             stop_event.set()
             break
 
-        draw_overlay(frame, measured_fps, pressed)
+        draw_overlay(frame, measured_fps, pressed, telemetry)
         cv2.imshow(WINDOW_NAME, frame)
         if cv2.waitKey(1) == 27:
             keys.request_stop()
@@ -260,6 +400,7 @@ def stream_loop(
 
 def main() -> None:
     keys = KeyboardState()
+    telemetry = TelemetryState()
     stop_event = threading.Event()
 
     def on_press(key: keyboard.Key | keyboard.KeyCode) -> None:
@@ -274,6 +415,7 @@ def main() -> None:
 
     control_client = make_client()
     camera_client = make_client()
+    telemetry_client = make_client()
     setup_drone(control_client)
 
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
@@ -281,12 +423,19 @@ def main() -> None:
 
     worker = threading.Thread(target=control_loop, args=(control_client, keys, stop_event), daemon=True)
     worker.start()
+    telemetry_worker = threading.Thread(
+        target=telemetry_loop,
+        args=(telemetry_client, telemetry, stop_event),
+        daemon=True,
+    )
+    telemetry_worker.start()
 
     try:
-        stream_loop(camera_client, keys, stop_event)
+        stream_loop(camera_client, keys, telemetry, stop_event)
     finally:
         stop_event.set()
         worker.join(timeout=2.0)
+        telemetry_worker.join(timeout=2.0)
         listener.stop()
         if LAND_ON_EXIT:
             control_client.landAsync(vehicle_name=VEHICLE_NAME).join()
