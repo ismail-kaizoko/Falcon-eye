@@ -33,8 +33,10 @@ All gameplay and streaming variables are in `airsim/drone_game_config.py`:
 | `STREAM_FPS` | Target camera refresh rate for the OpenCV window |
 | `COMMAND_HZ` | Rate of velocity command updates sent to AirSim |
 | `COMMAND_DURATION_SECONDS` | Duration attached to each short AirSim velocity command |
-| `TELEMETRY_HZ` | Rate of IMU reads used by the overlay |
-| `DISPLAY_IMU_OVERLAY` | Show/hide the IMU overlay lines |
+| `TELEMETRY_HZ` | Rate of true state angle reads used by the overlay |
+| `ANGLE_ESTIMATE_EVERY_N_FRAMES` | Run visual rotation estimation every N stream frames |
+| `SAVE_ANGLE_PLOTS` | Save roll/pitch/yaw plots when the program exits |
+| `ANGLE_PLOT_DIR` | Directory for saved angle plots |
 | `KEY_*` | AZERTY key bindings for movement and actions |
 | `FORWARD_SPEED_MPS` | Forward/back velocity in meters per second |
 | `STRAFE_SPEED_MPS` | Lateral velocity in meters per second |
@@ -50,9 +52,9 @@ The script creates three `MultirotorClient` instances:
 
 - The control client owns arming, takeoff, hover/land, state reads, and motion commands.
 - The camera client owns `simGetImages` calls and live display.
-- The telemetry client owns low-rate `getImuData` calls for the overlay.
+- The telemetry client owns low-rate state calls for true roll/pitch/yaw.
 
-The split matters because `simGetImages` is a blocking RPC call. The camera stream is now the main loop: each iteration fetches a frame, draws the overlay, displays it, then optionally sends a motion refresh. IMU reads are isolated in their own throttled loop so telemetry does not pause video.
+The split matters because `simGetImages` is a blocking RPC call. The camera stream is now the main loop: each iteration fetches a frame, estimates visual rotation from the previous frame, draws the overlay, displays it, then optionally sends a motion refresh. True state reads are isolated in their own throttled loop so telemetry does not pause video.
 
 Keyboard state is captured by `pynput` in event callbacks. The camera loop reads a snapshot of currently pressed keys after each displayed frame, converts it to body-frame velocity components, and sends:
 
@@ -79,11 +81,13 @@ airsim.ImageRequest(CAMERA_NAME, airsim.ImageType.Scene, False, False)
 
 Each `ImageResponse.image_data_uint8` buffer is reshaped into a NumPy image, converted from RGB to OpenCV's BGR format, annotated with a status overlay, and shown in a `cv2.imshow` window.
 
-The IMU overlay shows:
+The angle overlay shows:
 
-- Linear acceleration from `imu.linear_acceleration`, in `m/s2`.
-- Angular acceleration estimated from the derivative of `imu.angular_velocity`, in `rad/s2`.
-- Raw angular velocity, labelled `gyro`, in `rad/s`.
+- True roll, pitch, and yaw from `getMultirotorState().kinematics_estimated.orientation`.
+- Estimated roll, pitch, and yaw from integrating visual deltas returned by `algos.optical_flow.estimate_Rt`.
+- Delta roll, pitch, and yaw between the previous displayed camera frame and the current displayed camera frame.
+
+When the program exits, it saves one figure per angle in `ANGLE_PLOT_DIR`: `roll_true_vs_estimated.png`, `pitch_true_vs_estimated.png`, and `yaw_true_vs_estimated.png`.
 
 ## AirSim References
 

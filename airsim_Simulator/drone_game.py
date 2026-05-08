@@ -6,14 +6,24 @@ Run from the repository root:
 
 from __future__ import annotations
 
+# import sys
+# sys.path.append("../")
+
+
+import os
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Set
+from typing import Set, Tuple
 
 import airsim
 import cv2
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
+from airsim import to_eularian_angles
+from optical_flow import estimate_Rt, rotation_to_euler
 
 try:
     from pynput import keyboard
@@ -26,11 +36,12 @@ except ImportError as exc:  # pragma: no cover - runtime dependency guard
 from drone_game_config import (
     AIRSIM_HOST,
     AUTO_TAKEOFF,
+    ANGLE_ESTIMATE_EVERY_N_FRAMES,
+    ANGLE_PLOT_DIR,
     CAMERA_IMAGE_TYPE,
     CAMERA_NAME,
     COMMAND_DURATION_SECONDS,
     COMMAND_HZ,
-    DISPLAY_IMU_OVERLAY,
     DISPLAY_STATUS_OVERLAY,
     FAST_MULTIPLIER,
     FORWARD_SPEED_MPS,
@@ -48,6 +59,7 @@ from drone_game_config import (
     KEY_YAW_LEFT,
     KEY_YAW_RIGHT,
     LAND_ON_EXIT,
+    SAVE_ANGLE_PLOTS,
     STRAFE_SPEED_MPS,
     STREAM_FPS,
     TAKEOFF_TIMEOUT_SECONDS,
@@ -92,35 +104,73 @@ class KeyboardState:
             self.stop_requested = True
 
 
+AngleTriplet = Tuple[float, float, float]
+
+
 @dataclass
-class TelemetryState:
-    linear_acceleration: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    angular_acceleration: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    angular_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0)
+class OrientationState:
+    true_angles_deg: AngleTriplet = (0.0, 0.0, 0.0)
+    estimated_angles_deg: AngleTriplet = (0.0, 0.0, 0.0)
+    delta_angles_deg: AngleTriplet = (0.0, 0.0, 0.0)
+    last_estimation_ok: bool = False
     updated_at: float = 0.0
     lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def update(
-        self,
-        linear_acceleration: tuple[float, float, float],
-        angular_velocity: tuple[float, float, float],
-        angular_acceleration: tuple[float, float, float],
-    ) -> None:
+    def update_true(self, true_angles_deg: AngleTriplet) -> None:
         with self.lock:
-            self.linear_acceleration = linear_acceleration
-            self.angular_velocity = angular_velocity
-            self.angular_acceleration = angular_acceleration
+            self.true_angles_deg = true_angles_deg
             self.updated_at = time.perf_counter()
 
-    def snapshot(
+    def update_estimate(
         self,
-    ) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float], float]:
+        estimated_angles_deg: AngleTriplet,
+        delta_angles_deg: AngleTriplet,
+        ok: bool,
+    ) -> None:
+        with self.lock:
+            self.estimated_angles_deg = estimated_angles_deg
+            self.delta_angles_deg = delta_angles_deg
+            self.last_estimation_ok = ok
+
+    def snapshot(self) -> tuple[AngleTriplet, AngleTriplet, AngleTriplet, bool, float]:
         with self.lock:
             return (
-                self.linear_acceleration,
-                self.angular_velocity,
-                self.angular_acceleration,
+                self.true_angles_deg,
+                self.estimated_angles_deg,
+                self.delta_angles_deg,
+                self.last_estimation_ok,
                 self.updated_at,
+            )
+
+
+@dataclass
+class AngleHistory:
+    times: list[float] = field(default_factory=list)
+    true_angles_deg: list[AngleTriplet] = field(default_factory=list)
+    estimated_angles_deg: list[AngleTriplet] = field(default_factory=list)
+    delta_angles_deg: list[AngleTriplet] = field(default_factory=list)
+    start_time: float = field(default_factory=time.perf_counter)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def append(
+        self,
+        true_angles_deg: AngleTriplet,
+        estimated_angles_deg: AngleTriplet,
+        delta_angles_deg: AngleTriplet,
+    ) -> None:
+        with self.lock:
+            self.times.append(time.perf_counter() - self.start_time)
+            self.true_angles_deg.append(true_angles_deg)
+            self.estimated_angles_deg.append(estimated_angles_deg)
+            self.delta_angles_deg.append(delta_angles_deg)
+
+    def snapshot(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        with self.lock:
+            return (
+                np.asarray(self.times, dtype=float),
+                np.asarray(self.true_angles_deg, dtype=float),
+                np.asarray(self.estimated_angles_deg, dtype=float),
+                np.asarray(self.delta_angles_deg, dtype=float),
             )
 
 
@@ -243,41 +293,30 @@ def service_controls(
         scheduler.zero_sent = False
 
 
-def vector_to_tuple(vector: object) -> tuple[float, float, float]:
-    return (
-        float(vector.x_val),
-        float(vector.y_val),
-        float(vector.z_val),
-    )
+def add_angles(a: AngleTriplet, b: AngleTriplet) -> AngleTriplet:
+    return a[0] + b[0], a[1] + b[1], a[2] + b[2]
+
+
+def radians_to_degrees(angles_rad: AngleTriplet) -> AngleTriplet:
+    return tuple(float(np.degrees(value)) for value in angles_rad)  # type: ignore[return-value]
+
+
+def true_angles_from_state(client: airsim.MultirotorClient) -> AngleTriplet:
+    state = client.getMultirotorState(vehicle_name=VEHICLE_NAME)
+    pitch, roll, yaw = to_eularian_angles(state.kinematics_estimated.orientation)
+    return radians_to_degrees((roll, pitch, yaw))
 
 
 def telemetry_loop(
     client: airsim.MultirotorClient,
-    telemetry: TelemetryState,
+    orientation: OrientationState,
     stop_event: threading.Event,
 ) -> None:
     period = 1.0 / TELEMETRY_HZ
-    previous_angular_velocity: tuple[float, float, float] | None = None
-    previous_time: float | None = None
 
     while not stop_event.is_set():
         start = time.perf_counter()
-        imu = client.getImuData(vehicle_name=VEHICLE_NAME)
-        linear_acceleration = vector_to_tuple(imu.linear_acceleration)
-        angular_velocity = vector_to_tuple(imu.angular_velocity)
-
-        if previous_angular_velocity is None or previous_time is None:
-            angular_acceleration = (0.0, 0.0, 0.0)
-        else:
-            dt = max(1e-6, start - previous_time)
-            angular_acceleration = tuple(
-                (current - previous) / dt
-                for current, previous in zip(angular_velocity, previous_angular_velocity)
-            )
-
-        telemetry.update(linear_acceleration, angular_velocity, angular_acceleration)
-        previous_angular_velocity = angular_velocity
-        previous_time = start
+        orientation.update_true(true_angles_from_state(client))
 
         elapsed = time.perf_counter() - start
         time.sleep(max(0.0, period - elapsed))
@@ -292,20 +331,68 @@ def frame_from_response(response: airsim.ImageResponse) -> np.ndarray | None:
     return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
 
-def format_vector(values: tuple[float, float, float], unit: str) -> str:
-    return f"x {values[0]: .2f} y {values[1]: .2f} z {values[2]: .2f} {unit}"
+def estimate_delta_angles(previous_frame: np.ndarray, frame: np.ndarray) -> tuple[AngleTriplet, bool]:
+    try:
+        _, _, _, roll, pitch, yaw = estimate_Rt(previous_frame, frame)
+    except Exception:
+        return (0.0, 0.0, 0.0), False
+
+    delta = radians_to_degrees((roll, pitch, yaw))
+    if not np.all(np.isfinite(delta)):
+        return (0.0, 0.0, 0.0), False
+    return delta, True
 
 
-def draw_overlay(frame: np.ndarray, fps: float, keys: Set[str], telemetry: TelemetryState) -> None:
+def save_angle_plots(history: AngleHistory) -> list[str]:
+    if not SAVE_ANGLE_PLOTS:
+        return []
+
+    times, true_angles, estimated_angles, _ = history.snapshot()
+    if len(times) < 2:
+        return []
+
+    os.makedirs(ANGLE_PLOT_DIR, exist_ok=True)
+    saved_paths: list[str] = []
+    labels = ("roll", "pitch", "yaw")
+
+    for index, label in enumerate(labels):
+        plt.figure(figsize=(10, 5))
+        plt.plot(times, true_angles[:, index], label=f"true {label}")
+        plt.plot(times, estimated_angles[:, index], label=f"estimated {label}")
+        plt.xlabel("time (s)")
+        plt.ylabel("angle (deg)")
+        plt.title(f"{label.title()} true vs estimated")
+        plt.grid(True, alpha=0.35)
+        plt.legend()
+        plt.tight_layout()
+
+        path = os.path.join(ANGLE_PLOT_DIR, f"{label}_true_vs_estimated.png")
+        plt.savefig(path, dpi=140)
+        plt.close()
+        saved_paths.append(path)
+
+    return saved_paths
+
+
+def format_angles(angles: AngleTriplet) -> str:
+    roll, pitch, yaw = angles
+    return f"yaw {yaw:7.2f}  pitch {pitch:7.2f}  roll {roll:7.2f}"
+
+
+def draw_overlay(frame: np.ndarray, fps: float, keys: Set[str], orientation: OrientationState) -> None:
     if not DISPLAY_STATUS_OVERLAY:
         return
+
+    true_angles, estimated_angles, delta_angles, estimate_ok, updated_at = orientation.snapshot()
+    age = time.perf_counter() - updated_at if updated_at else 0.0
+    status = "ok" if estimate_ok else "waiting"
 
     cv2.putText(
         frame,
         KEY_HELP,
         (12, 24),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.52,
+        0.3,
         (245, 245, 245),
         1,
         cv2.LINE_AA,
@@ -316,43 +403,37 @@ def draw_overlay(frame: np.ndarray, fps: float, keys: Set[str], telemetry: Telem
         f"stream {fps:4.1f} fps | keys: {' '.join(sorted(keys))}",
         (12, 50),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.52,
+        0.3,
         (80, 220, 120),
         1,
         cv2.LINE_AA,
     )
-
-    if not DISPLAY_IMU_OVERLAY:
-        return
-
-    linear_acceleration, angular_velocity, angular_acceleration, updated_at = telemetry.snapshot()
-    age = time.perf_counter() - updated_at if updated_at else 0.0
     cv2.putText(
         frame,
-        "lin acc  " + format_vector(linear_acceleration, "m/s2"),
+        "true  " + format_angles(true_angles),
         (12, 78),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.52,
+        0.3,
         (255, 225, 110),
         1,
         cv2.LINE_AA,
     )
     cv2.putText(
         frame,
-        "ang acc  " + format_vector(angular_acceleration, "rad/s2"),
+        "est   " + format_angles(estimated_angles) + f"  {status}",
         (12, 104),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.52,
+        0.3,
         (255, 225, 110),
         1,
         cv2.LINE_AA,
     )
     cv2.putText(
         frame,
-        "gyro     " + format_vector(angular_velocity, f"rad/s {age:0.1f}s"),
+        "delta " + format_angles(delta_angles) + f"  state {age:0.1f}s",
         (12, 130),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.52,
+        0.3,
         (255, 225, 110),
         1,
         cv2.LINE_AA,
@@ -363,7 +444,8 @@ def stream_loop(
     control_client: airsim.MultirotorClient,
     client: airsim.MultirotorClient,
     keys: KeyboardState,
-    telemetry: TelemetryState,
+    orientation: OrientationState,
+    history: AngleHistory,
     stop_event: threading.Event,
 ) -> None:
     image_type = airsim_image_type()
@@ -372,6 +454,9 @@ def stream_loop(
     last_frame_time = time.perf_counter()
     measured_fps = 0.0
     scheduler = CommandScheduler()
+    previous_frame: np.ndarray | None = None
+    frame_index = 0
+    estimated_angles: AngleTriplet | None = None
 
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 
@@ -382,6 +467,7 @@ def stream_loop(
         if frame is None:
             time.sleep(period)
             continue
+        raw_frame = frame.copy()
 
         now = time.perf_counter()
         measured_fps = 0.85 * measured_fps + 0.15 * (1.0 / max(1e-6, now - last_frame_time))
@@ -392,7 +478,24 @@ def stream_loop(
             stop_event.set()
             break
 
-        draw_overlay(frame, measured_fps, pressed, telemetry)
+        true_angles, _, _, _, _ = orientation.snapshot()
+        if estimated_angles is None:
+            estimated_angles = true_angles
+            orientation.update_estimate(estimated_angles, (0.0, 0.0, 0.0), False)
+
+        if previous_frame is not None and frame_index % ANGLE_ESTIMATE_EVERY_N_FRAMES == 0:
+            delta_angles, estimate_ok = estimate_delta_angles(previous_frame, raw_frame)
+            if estimate_ok:
+                estimated_angles = add_angles(estimated_angles, delta_angles)
+            orientation.update_estimate(estimated_angles, delta_angles, estimate_ok)
+        else:
+            _, current_estimated, current_delta, current_ok, _ = orientation.snapshot()
+            orientation.update_estimate(current_estimated, current_delta, current_ok)
+
+        true_angles, current_estimated, current_delta, _, _ = orientation.snapshot()
+        history.append(true_angles, current_estimated, current_delta)
+
+        draw_overlay(frame, measured_fps, pressed, orientation)
         cv2.imshow(WINDOW_NAME, frame)
         if cv2.waitKey(1) == 27:
             keys.request_stop()
@@ -400,6 +503,8 @@ def stream_loop(
             break
 
         service_controls(control_client, pressed, scheduler)
+        previous_frame = raw_frame
+        frame_index += 1
 
         elapsed = time.perf_counter() - start
         time.sleep(max(0.0, period - elapsed))
@@ -407,7 +512,8 @@ def stream_loop(
 
 def main() -> None:
     keys = KeyboardState()
-    telemetry = TelemetryState()
+    orientation = OrientationState()
+    history = AngleHistory()
     stop_event = threading.Event()
 
     def on_press(key: keyboard.Key | keyboard.KeyCode) -> None:
@@ -424,19 +530,21 @@ def main() -> None:
     camera_client = make_client()
     telemetry_client = make_client()
     setup_drone(control_client)
+    orientation.update_true(true_angles_from_state(telemetry_client))
 
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
     listener.start()
 
     telemetry_worker = threading.Thread(
         target=telemetry_loop,
-        args=(telemetry_client, telemetry, stop_event),
+        args=(telemetry_client, orientation, stop_event),
         daemon=True,
     )
     telemetry_worker.start()
 
+    saved_plots: list[str] = []
     try:
-        stream_loop(control_client, camera_client, keys, telemetry, stop_event)
+        stream_loop(control_client, camera_client, keys, orientation, history, stop_event)
     finally:
         stop_event.set()
         telemetry_worker.join(timeout=2.0)
@@ -446,6 +554,9 @@ def main() -> None:
         elif HOVER_ON_EXIT:
             control_client.hoverAsync(vehicle_name=VEHICLE_NAME).join()
         cv2.destroyAllWindows()
+        saved_plots = save_angle_plots(history)
+        for path in saved_plots:
+            print(f"Saved angle plot: {path}")
 
 
 if __name__ == "__main__":
