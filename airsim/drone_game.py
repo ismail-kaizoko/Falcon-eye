@@ -48,8 +48,6 @@ from drone_game_config import (
     KEY_YAW_LEFT,
     KEY_YAW_RIGHT,
     LAND_ON_EXIT,
-    MAX_ALTITUDE_UP_METERS,
-    MIN_ALTITUDE_UP_METERS,
     STRAFE_SPEED_MPS,
     STREAM_FPS,
     TAKEOFF_TIMEOUT_SECONDS,
@@ -77,6 +75,8 @@ class KeyboardState:
         with self.lock:
             if key == "esc":
                 self.stop_requested = True
+            if key in self.pressed:
+                return
             self.pressed.add(key)
 
     def release(self, key: str) -> None:
@@ -165,79 +165,82 @@ def setup_drone(client: airsim.MultirotorClient) -> None:
         client.hoverAsync(vehicle_name=VEHICLE_NAME).join()
 
 
-def current_altitude_up(client: airsim.MultirotorClient) -> float:
-    state = client.getMultirotorState(vehicle_name=VEHICLE_NAME)
-    return -float(state.kinematics_estimated.position.z_val)
-
-
 def axis(pressed: Set[str], positive: str, negative: str) -> float:
     return float(positive in pressed) - float(negative in pressed)
 
 
-def control_loop(
+@dataclass
+class CommandScheduler:
+    last_motion_refresh: float = 0.0
+    last_discrete_action: float = 0.0
+    last_command: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    zero_sent: bool = False
+
+
+def command_from_keys(pressed: Set[str]) -> tuple[float, float, float, float]:
+    speed_multiplier = FAST_MULTIPLIER if KEY_FAST in pressed else 1.0
+    vx = axis(pressed, positive=KEY_FORWARD, negative=KEY_BACKWARD) * FORWARD_SPEED_MPS * speed_multiplier
+    vy = axis(pressed, positive=KEY_STRAFE_RIGHT, negative=KEY_STRAFE_LEFT) * STRAFE_SPEED_MPS * speed_multiplier
+    vz = axis(pressed, positive=KEY_DOWN, negative=KEY_UP) * VERTICAL_SPEED_MPS
+    yaw_rate = axis(pressed, positive=KEY_YAW_RIGHT, negative=KEY_YAW_LEFT) * YAW_RATE_DEG_PER_SEC * speed_multiplier
+    return vx, vy, vz, yaw_rate
+
+
+def send_motion_command(
     client: airsim.MultirotorClient,
-    keys: KeyboardState,
-    stop_event: threading.Event,
+    command: tuple[float, float, float, float],
 ) -> None:
-    period = 1.0 / COMMAND_HZ
-    last_discrete_action = 0.0
-    last_command_was_zero = False
-    last_altitude_check = 0.0
-    altitude = 0.0
+    vx, vy, vz, yaw_rate = command
+    client.moveByVelocityBodyFrameAsync(
+        vx,
+        vy,
+        vz,
+        COMMAND_DURATION_SECONDS,
+        drivetrain=airsim.DrivetrainType.MaxDegreeOfFreedom,
+        yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=yaw_rate),
+        vehicle_name=VEHICLE_NAME,
+    )
 
-    while not stop_event.is_set():
-        start = time.perf_counter()
-        pressed, stop_requested = keys.snapshot()
-        if stop_requested:
-            stop_event.set()
-            break
 
-        if KEY_TAKEOFF in pressed and start - last_discrete_action > 0.8:
-            client.takeoffAsync(timeout_sec=TAKEOFF_TIMEOUT_SECONDS, vehicle_name=VEHICLE_NAME).join()
-            last_discrete_action = start
-            continue
-        elif KEY_LAND in pressed and start - last_discrete_action > 0.8:
-            client.landAsync(vehicle_name=VEHICLE_NAME).join()
-            last_discrete_action = start
-            continue
-        elif KEY_HOVER in pressed and start - last_discrete_action > 0.4:
-            client.hoverAsync(vehicle_name=VEHICLE_NAME).join()
-            last_discrete_action = start
-            continue
+def service_controls(
+    client: airsim.MultirotorClient,
+    pressed: Set[str],
+    scheduler: CommandScheduler,
+) -> None:
+    now = time.perf_counter()
 
-        speed_multiplier = FAST_MULTIPLIER if KEY_FAST in pressed else 1.0
-        vx = axis(pressed, positive=KEY_FORWARD, negative=KEY_BACKWARD) * FORWARD_SPEED_MPS * speed_multiplier
-        vy = axis(pressed, positive=KEY_STRAFE_RIGHT, negative=KEY_STRAFE_LEFT) * STRAFE_SPEED_MPS * speed_multiplier
-        vz = axis(pressed, positive=KEY_DOWN, negative=KEY_UP) * VERTICAL_SPEED_MPS
-        yaw_rate = axis(pressed, positive=KEY_YAW_RIGHT, negative=KEY_YAW_LEFT) * YAW_RATE_DEG_PER_SEC * speed_multiplier
+    if KEY_TAKEOFF in pressed and now - scheduler.last_discrete_action > 0.8:
+        client.takeoffAsync(timeout_sec=TAKEOFF_TIMEOUT_SECONDS, vehicle_name=VEHICLE_NAME)
+        scheduler.last_discrete_action = now
+        return
+    if KEY_LAND in pressed and now - scheduler.last_discrete_action > 0.8:
+        client.landAsync(vehicle_name=VEHICLE_NAME)
+        scheduler.last_discrete_action = now
+        return
+    if KEY_HOVER in pressed and now - scheduler.last_discrete_action > 0.4:
+        client.hoverAsync(vehicle_name=VEHICLE_NAME)
+        scheduler.last_discrete_action = now
+        scheduler.zero_sent = True
+        scheduler.last_command = (0.0, 0.0, 0.0, 0.0)
+        return
 
-        if vz != 0.0 and start - last_altitude_check > 0.25:
-            altitude = current_altitude_up(client)
-            last_altitude_check = start
-            if altitude >= MAX_ALTITUDE_UP_METERS and vz < 0:
-                vz = 0.0
-            if altitude <= MIN_ALTITUDE_UP_METERS and vz > 0:
-                vz = 0.0
+    command = command_from_keys(pressed)
+    command_is_zero = command == (0.0, 0.0, 0.0, 0.0)
 
-        command_is_zero = vx == 0.0 and vy == 0.0 and vz == 0.0 and yaw_rate == 0.0
-        if command_is_zero and last_command_was_zero:
-            elapsed = time.perf_counter() - start
-            time.sleep(max(0.0, period - elapsed))
-            continue
+    if command_is_zero:
+        if not scheduler.zero_sent:
+            send_motion_command(client, command)
+            scheduler.zero_sent = True
+            scheduler.last_command = command
+        return
 
-        client.moveByVelocityBodyFrameAsync(
-            vx,
-            vy,
-            vz,
-            COMMAND_DURATION_SECONDS,
-            drivetrain=airsim.DrivetrainType.MaxDegreeOfFreedom,
-            yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=yaw_rate),
-            vehicle_name=VEHICLE_NAME,
-        ).join()
-        last_command_was_zero = command_is_zero
-
-        elapsed = time.perf_counter() - start
-        time.sleep(max(0.0, period - elapsed))
+    command_changed = command != scheduler.last_command
+    refresh_due = now - scheduler.last_motion_refresh >= 1.0 / COMMAND_HZ
+    if command_changed or refresh_due:
+        send_motion_command(client, command)
+        scheduler.last_motion_refresh = now
+        scheduler.last_command = command
+        scheduler.zero_sent = False
 
 
 def vector_to_tuple(vector: object) -> tuple[float, float, float]:
@@ -357,6 +360,7 @@ def draw_overlay(frame: np.ndarray, fps: float, keys: Set[str], telemetry: Telem
 
 
 def stream_loop(
+    control_client: airsim.MultirotorClient,
     client: airsim.MultirotorClient,
     keys: KeyboardState,
     telemetry: TelemetryState,
@@ -367,6 +371,7 @@ def stream_loop(
     period = 1.0 / STREAM_FPS
     last_frame_time = time.perf_counter()
     measured_fps = 0.0
+    scheduler = CommandScheduler()
 
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 
@@ -393,6 +398,8 @@ def stream_loop(
             keys.request_stop()
             stop_event.set()
             break
+
+        service_controls(control_client, pressed, scheduler)
 
         elapsed = time.perf_counter() - start
         time.sleep(max(0.0, period - elapsed))
@@ -421,8 +428,6 @@ def main() -> None:
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
     listener.start()
 
-    worker = threading.Thread(target=control_loop, args=(control_client, keys, stop_event), daemon=True)
-    worker.start()
     telemetry_worker = threading.Thread(
         target=telemetry_loop,
         args=(telemetry_client, telemetry, stop_event),
@@ -431,10 +436,9 @@ def main() -> None:
     telemetry_worker.start()
 
     try:
-        stream_loop(camera_client, keys, telemetry, stop_event)
+        stream_loop(control_client, camera_client, keys, telemetry, stop_event)
     finally:
         stop_event.set()
-        worker.join(timeout=2.0)
         telemetry_worker.join(timeout=2.0)
         listener.stop()
         if LAND_ON_EXIT:

@@ -40,9 +40,7 @@ All gameplay and streaming variables are in `airsim/drone_game_config.py`:
 | `STRAFE_SPEED_MPS` | Lateral velocity in meters per second |
 | `VERTICAL_SPEED_MPS` | Up/down velocity in meters per second |
 | `FAST_MULTIPLIER` | Speed multiplier when `Shift` is held |
-| `YAW_RATE_DEG_PER_SEC` | Rotation speed for `Q`/`E` |
-| `MAX_ALTITUDE_UP_METERS` | Upward altitude clamp, converted from AirSim NED `z` |
-| `MIN_ALTITUDE_UP_METERS` | Minimum altitude before down commands are blocked |
+| `YAW_RATE_DEG_PER_SEC` | Rotation speed for `A`/`E` |
 
 ## Mechanism
 
@@ -54,9 +52,9 @@ The script creates three `MultirotorClient` instances:
 - The camera client owns `simGetImages` calls and live display.
 - The telemetry client owns low-rate `getImuData` calls for the overlay.
 
-The split matters because `simGetImages` is a blocking RPC call. Instead of letting camera acquisition interrupt the flight loop, `drone_game.py` runs flight control in a background thread at `COMMAND_HZ` while the main thread fetches camera frames at `STREAM_FPS` and renders them with OpenCV. IMU reads are also isolated in their own throttled loop so telemetry does not pause video.
+The split matters because `simGetImages` is a blocking RPC call. The camera stream is now the main loop: each iteration fetches a frame, draws the overlay, displays it, then optionally sends a motion refresh. IMU reads are isolated in their own throttled loop so telemetry does not pause video.
 
-Keyboard state is captured by `pynput` in event callbacks. The control loop reads a snapshot of currently pressed keys, converts it to body-frame velocity components, and sends:
+Keyboard state is captured by `pynput` in event callbacks. The camera loop reads a snapshot of currently pressed keys after each displayed frame, converts it to body-frame velocity components, and sends:
 
 ```python
 client.moveByVelocityBodyFrameAsync(
@@ -71,7 +69,7 @@ client.moveByVelocityBodyFrameAsync(
 
 `moveByVelocityBodyFrameAsync` gives the GTA-like feel: `Z` always moves toward the drone camera's current forward direction after yaw, instead of moving along a fixed global axis. The command duration is deliberately short and refreshed many times per second. Releasing keys naturally causes the next command to become zero velocity plus zero yaw rate.
 
-To avoid frozen video while keys are held, movement commands are joined before the next movement command is issued, idle zero-velocity commands are not spammed, and altitude checks are throttled. This keeps AirSim's RPC queue from being dominated by movement/state calls while the camera stream is trying to fetch frames.
+To avoid frozen video while keys are held, movement commands are sent only from the camera loop after a frame has been displayed. Holding a key refreshes movement at `COMMAND_HZ`, and releasing the key sends exactly one zero-velocity command. This keeps AirSim's RPC queue from being dominated by movement/state calls while the camera stream is trying to fetch frames.
 
 The camera stream requests uncompressed RGB scene frames:
 

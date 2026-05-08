@@ -14,8 +14,8 @@ DISPLAY_IMU_OVERLAY = True
 TELEMETRY_HZ = 10.0
 
 # Control loop.
-COMMAND_HZ = 12.0
-COMMAND_DURATION_SECONDS = 0.08
+COMMAND_HZ = 4.0
+COMMAND_DURATION_SECONDS = 0.35
 
 # AZERTY keyboard map.
 KEY_FORWARD = "z"
@@ -32,9 +32,9 @@ KEY_TAKEOFF = "t"
 KEY_LAND = "l"
 
 # Body-frame velocities in meters/second.
-FORWARD_SPEED_MPS = 4.0
-STRAFE_SPEED_MPS = 3.0
-VERTICAL_SPEED_MPS = 2.0
+FORWARD_SPEED_MPS = 10.0
+STRAFE_SPEED_MPS = 10.0
+VERTICAL_SPEED_MPS = 10.0
 FAST_MULTIPLIER = 1.75
 
 # Yaw rate in degrees/second.
@@ -45,7 +45,3 @@ AUTO_TAKEOFF = True
 TAKEOFF_TIMEOUT_SECONDS = 12.0
 LAND_ON_EXIT = False
 HOVER_ON_EXIT = True
-
-# Safety clamps. AirSim uses NED coordinates: negative Z is up.
-MAX_ALTITUDE_UP_METERS = 30.0
-MIN_ALTITUDE_UP_METERS = 0.5
