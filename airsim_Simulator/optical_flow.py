@@ -3,40 +3,52 @@ import numpy as np
 import glob
 
 
-def Lucas_Kanade(frame1, frame2):
+def _validate_frame_pair(frame1, frame2):
+    if frame1 is None or frame2 is None:
+        raise ValueError("frame1 and frame2 must be valid images, got None")
+    if frame1.ndim != 3 or frame2.ndim != 3:
+        raise ValueError("frame1 and frame2 must be color images with 3 channels")
+    if frame1.shape != frame2.shape:
+        raise ValueError(f"frame shapes must match, got {frame1.shape} and {frame2.shape}")
 
-    # Convert to grayscale
+
+def _tracked_points(frame1, frame2):
+    _validate_frame_pair(frame1, frame2)
+
     gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
     gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
 
-    # Detect good features to track (Shi-Tomasi corners)
     features = cv2.goodFeaturesToTrack(
         gray1,
         maxCorners=200,
         qualityLevel=0.01,
         minDistance=7
     )
+    if features is None or len(features) < 8:
+        raise ValueError("not enough trackable features in frame1")
 
-
-    # Lucas-Kanade optical flow parameters
     lk_params = dict(
         winSize=(15, 15),
-        maxLevel=2,  # pyramid levels
+        maxLevel=2,
         criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03)
     )
 
-
-
-    # Compute optical flow
     new_points, status, error = cv2.calcOpticalFlowPyrLK(
         gray1, gray2, features, None, **lk_params
     )
+    if new_points is None or status is None:
+        raise ValueError("optical flow failed to track points")
 
-
-
-    # Select valid points
     good_old = features[status == 1]
     good_new = new_points[status == 1]
+    if len(good_old) < 8:
+        raise ValueError("not enough valid tracked points")
+
+    return gray1, good_old, good_new
+
+
+def Lucas_Kanade(frame1, frame2):
+    gray1, good_old, good_new = _tracked_points(frame1, frame2)
 
 
     # --- RANSAC filtering using Fundamental Matrix ---
@@ -50,6 +62,8 @@ def Lucas_Kanade(frame1, frame2):
         ransacReprojThreshold=1.0,
         confidence=0.99
     )
+    if mask is None:
+        raise ValueError("fundamental matrix estimation failed")
 
     # Keep only inliers
     inliers_old = good_old[mask.ravel() == 1]
@@ -60,37 +74,7 @@ def Lucas_Kanade(frame1, frame2):
 
 
 def estimate_Rt(frame1, frame2):
-    # Convert to grayscale
-    gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
-    gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
-
-    # Detect good features to track (Shi-Tomasi corners)
-    features = cv2.goodFeaturesToTrack(
-        gray1,
-        maxCorners=200,
-        qualityLevel=0.01,
-        minDistance=7
-    )
-
-
-    # Lucas-Kanade optical flow parameters
-    lk_params = dict(
-        winSize=(15, 15),
-        maxLevel=2,  # pyramid levels
-        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03)
-    )
-
-
-    # Compute optical flow
-    new_points, status, error = cv2.calcOpticalFlowPyrLK(
-        gray1, gray2, features, None, **lk_params
-    )
-
-    # Select valid points
-    good_old = features[status == 1]
-    good_new = new_points[status == 1]
-
-
+    gray1, good_old, good_new = _tracked_points(frame1, frame2)
     h, w = gray1.shape
 
 
@@ -111,10 +95,14 @@ def estimate_Rt(frame1, frame2):
         prob=0.999,
         threshold=1.0
     )
+    if E is None or mask is None:
+        raise ValueError("essential matrix estimation failed")
 
     # mask = inliers (1) / outliers (0)
     inliers1 = good_old[mask.ravel() == 1]
     inliers2 = good_new[mask.ravel() == 1]
+    if len(inliers1) < 5:
+        raise ValueError("not enough inliers to recover pose")
 
     # --- Recover pose (R, t direction) ---
     _, R, t, mask_pose = cv2.recoverPose(E, inliers1, inliers2, K)

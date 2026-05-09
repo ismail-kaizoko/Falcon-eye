@@ -23,7 +23,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from airsim import to_eularian_angles
-from optical_flow import estimate_Rt, rotation_to_euler
+
+try:
+    from .optical_flow import estimate_Rt
+except ImportError:  # Support `python airsim_Simulator/drone_game.py`.
+    from optical_flow import estimate_Rt
 
 try:
     from pynput import keyboard
@@ -33,42 +37,80 @@ except ImportError as exc:  # pragma: no cover - runtime dependency guard
         "`pip install -r requirements.txt`."
     ) from exc
 
-from drone_game_config import (
-    AIRSIM_HOST,
-    AUTO_TAKEOFF,
-    ANGLE_ESTIMATE_EVERY_N_FRAMES,
-    ANGLE_PLOT_DIR,
-    CAMERA_IMAGE_TYPE,
-    CAMERA_NAME,
-    COMMAND_DURATION_SECONDS,
-    COMMAND_HZ,
-    DISPLAY_STATUS_OVERLAY,
-    FAST_MULTIPLIER,
-    FORWARD_SPEED_MPS,
-    HOVER_ON_EXIT,
-    KEY_BACKWARD,
-    KEY_DOWN,
-    KEY_FAST,
-    KEY_FORWARD,
-    KEY_HOVER,
-    KEY_LAND,
-    KEY_STRAFE_LEFT,
-    KEY_STRAFE_RIGHT,
-    KEY_TAKEOFF,
-    KEY_UP,
-    KEY_YAW_LEFT,
-    KEY_YAW_RIGHT,
-    LAND_ON_EXIT,
-    SAVE_ANGLE_PLOTS,
-    STRAFE_SPEED_MPS,
-    STREAM_FPS,
-    TAKEOFF_TIMEOUT_SECONDS,
-    TELEMETRY_HZ,
-    VEHICLE_NAME,
-    VERTICAL_SPEED_MPS,
-    WINDOW_NAME,
-    YAW_RATE_DEG_PER_SEC,
-)
+try:
+    from .drone_game_config import (
+        AIRSIM_HOST,
+        AUTO_TAKEOFF,
+        ANGLE_ESTIMATE_EVERY_N_FRAMES,
+        ANGLE_PLOT_DIR,
+        CAMERA_IMAGE_TYPE,
+        CAMERA_NAME,
+        COMMAND_DURATION_SECONDS,
+        COMMAND_HZ,
+        DISPLAY_STATUS_OVERLAY,
+        FAST_MULTIPLIER,
+        FORWARD_SPEED_MPS,
+        HOVER_ON_EXIT,
+        KEY_BACKWARD,
+        KEY_DOWN,
+        KEY_FAST,
+        KEY_FORWARD,
+        KEY_HOVER,
+        KEY_LAND,
+        KEY_STRAFE_LEFT,
+        KEY_STRAFE_RIGHT,
+        KEY_TAKEOFF,
+        KEY_UP,
+        KEY_YAW_LEFT,
+        KEY_YAW_RIGHT,
+        LAND_ON_EXIT,
+        SAVE_ANGLE_PLOTS,
+        STRAFE_SPEED_MPS,
+        STREAM_FPS,
+        TAKEOFF_TIMEOUT_SECONDS,
+        TELEMETRY_HZ,
+        VEHICLE_NAME,
+        VERTICAL_SPEED_MPS,
+        WINDOW_NAME,
+        YAW_RATE_DEG_PER_SEC,
+    )
+except ImportError:  # Support `python airsim_Simulator/drone_game.py`.
+    from drone_game_config import (
+        AIRSIM_HOST,
+        AUTO_TAKEOFF,
+        ANGLE_ESTIMATE_EVERY_N_FRAMES,
+        ANGLE_PLOT_DIR,
+        CAMERA_IMAGE_TYPE,
+        CAMERA_NAME,
+        COMMAND_DURATION_SECONDS,
+        COMMAND_HZ,
+        DISPLAY_STATUS_OVERLAY,
+        FAST_MULTIPLIER,
+        FORWARD_SPEED_MPS,
+        HOVER_ON_EXIT,
+        KEY_BACKWARD,
+        KEY_DOWN,
+        KEY_FAST,
+        KEY_FORWARD,
+        KEY_HOVER,
+        KEY_LAND,
+        KEY_STRAFE_LEFT,
+        KEY_STRAFE_RIGHT,
+        KEY_TAKEOFF,
+        KEY_UP,
+        KEY_YAW_LEFT,
+        KEY_YAW_RIGHT,
+        LAND_ON_EXIT,
+        SAVE_ANGLE_PLOTS,
+        STRAFE_SPEED_MPS,
+        STREAM_FPS,
+        TAKEOFF_TIMEOUT_SECONDS,
+        TELEMETRY_HZ,
+        VEHICLE_NAME,
+        VERTICAL_SPEED_MPS,
+        WINDOW_NAME,
+        YAW_RATE_DEG_PER_SEC,
+    )
 
 
 KEY_HELP = (
@@ -337,7 +379,7 @@ def estimate_delta_angles(previous_frame: np.ndarray, frame: np.ndarray) -> tupl
     except Exception:
         return (0.0, 0.0, 0.0), False
 
-    delta = radians_to_degrees((roll, pitch, yaw))
+    delta = (roll, pitch, yaw)
     if not np.all(np.isfinite(delta)):
         return (0.0, 0.0, 0.0), False
     return delta, True
