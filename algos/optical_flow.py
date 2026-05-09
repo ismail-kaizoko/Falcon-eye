@@ -3,6 +3,9 @@ import numpy as np
 import glob
 
 
+MIN_POSE_FLOW_PX = 0.35
+
+
 def _validate_frame_pair(frame1, frame2):
     if frame1 is None or frame2 is None:
         raise ValueError("frame1 and frame2 must be valid images, got None")
@@ -47,6 +50,12 @@ def _tracked_points(frame1, frame2):
     return gray1, good_old, good_new
 
 
+def _median_flow_px(good_old, good_new):
+    old = good_old.reshape(-1, 2)
+    new = good_new.reshape(-1, 2)
+    return float(np.median(np.linalg.norm(new - old, axis=1)))
+
+
 def Lucas_Kanade(frame1, frame2):
     gray1, good_old, good_new = _tracked_points(frame1, frame2)
 
@@ -75,6 +84,9 @@ def Lucas_Kanade(frame1, frame2):
 
 def estimate_Rt(frame1, frame2):
     gray1, good_old, good_new = _tracked_points(frame1, frame2)
+    if _median_flow_px(good_old, good_new) < MIN_POSE_FLOW_PX:
+        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+
     h, w = gray1.shape
 
 

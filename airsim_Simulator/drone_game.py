@@ -43,6 +43,8 @@ try:
         AUTO_TAKEOFF,
         ANGLE_ESTIMATE_EVERY_N_FRAMES,
         ANGLE_PLOT_DIR,
+        ANGLE_DEADBAND_DEG,
+        ANGLE_SMOOTHING_ALPHA,
         CAMERA_IMAGE_TYPE,
         CAMERA_NAME,
         COMMAND_DURATION_SECONDS,
@@ -64,6 +66,8 @@ try:
         KEY_YAW_LEFT,
         KEY_YAW_RIGHT,
         LAND_ON_EXIT,
+        MAX_ABS_DELTA_ANGLE_DEG,
+        MIN_TRACKED_FLOW_PX,
         SAVE_ANGLE_PLOTS,
         STRAFE_SPEED_MPS,
         STREAM_FPS,
@@ -80,6 +84,8 @@ except ImportError:  # Support `python airsim_Simulator/drone_game.py`.
         AUTO_TAKEOFF,
         ANGLE_ESTIMATE_EVERY_N_FRAMES,
         ANGLE_PLOT_DIR,
+        ANGLE_DEADBAND_DEG,
+        ANGLE_SMOOTHING_ALPHA,
         CAMERA_IMAGE_TYPE,
         CAMERA_NAME,
         COMMAND_DURATION_SECONDS,
@@ -101,6 +107,8 @@ except ImportError:  # Support `python airsim_Simulator/drone_game.py`.
         KEY_YAW_LEFT,
         KEY_YAW_RIGHT,
         LAND_ON_EXIT,
+        MAX_ABS_DELTA_ANGLE_DEG,
+        MIN_TRACKED_FLOW_PX,
         SAVE_ANGLE_PLOTS,
         STRAFE_SPEED_MPS,
         STREAM_FPS,
@@ -269,6 +277,44 @@ class CommandScheduler:
     zero_sent: bool = False
 
 
+@dataclass
+class AngleIntegrator:
+    estimate: AngleTriplet | None = None
+    smoothed_delta: AngleTriplet = (0.0, 0.0, 0.0)
+
+    def reset(self, initial_angles: AngleTriplet) -> None:
+        self.estimate = initial_angles
+        self.smoothed_delta = (0.0, 0.0, 0.0)
+
+    def update(self, raw_delta: AngleTriplet, ok: bool) -> tuple[AngleTriplet, AngleTriplet, bool]:
+        if self.estimate is None:
+            raise RuntimeError("AngleIntegrator must be reset before update")
+
+        if not ok:
+            self.smoothed_delta = (0.0, 0.0, 0.0)
+            return self.estimate, self.smoothed_delta, False
+
+        if max(abs(value) for value in raw_delta) > MAX_ABS_DELTA_ANGLE_DEG:
+            self.smoothed_delta = (0.0, 0.0, 0.0)
+            return self.estimate, self.smoothed_delta, False
+
+        filtered_delta = tuple(
+            0.0 if abs(value) < ANGLE_DEADBAND_DEG else value
+            for value in raw_delta
+        )
+        self.smoothed_delta = tuple(
+            ANGLE_SMOOTHING_ALPHA * current + (1.0 - ANGLE_SMOOTHING_ALPHA) * previous
+            for current, previous in zip(filtered_delta, self.smoothed_delta)
+        )
+
+        if max(abs(value) for value in self.smoothed_delta) < ANGLE_DEADBAND_DEG:
+            self.smoothed_delta = (0.0, 0.0, 0.0)
+            return self.estimate, self.smoothed_delta, False
+
+        self.estimate = add_angles(self.estimate, self.smoothed_delta)
+        return self.estimate, self.smoothed_delta, True
+
+
 def command_from_keys(pressed: Set[str]) -> tuple[float, float, float, float]:
     speed_multiplier = FAST_MULTIPLIER if KEY_FAST in pressed else 1.0
     vx = axis(pressed, positive=KEY_FORWARD, negative=KEY_BACKWARD) * FORWARD_SPEED_MPS * speed_multiplier
@@ -373,7 +419,41 @@ def frame_from_response(response: airsim.ImageResponse) -> np.ndarray | None:
     return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
 
+def median_tracked_flow_px(previous_frame: np.ndarray, frame: np.ndarray) -> float:
+    gray1 = cv2.cvtColor(previous_frame, cv2.COLOR_BGR2GRAY)
+    gray2 = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    features = cv2.goodFeaturesToTrack(
+        gray1,
+        maxCorners=200,
+        qualityLevel=0.01,
+        minDistance=7,
+    )
+    if features is None or len(features) < 8:
+        return 0.0
+
+    new_points, status, _ = cv2.calcOpticalFlowPyrLK(
+        gray1,
+        gray2,
+        features,
+        None,
+        winSize=(15, 15),
+        maxLevel=2,
+        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03),
+    )
+    if new_points is None or status is None:
+        return 0.0
+
+    old = features[status == 1].reshape(-1, 2)
+    new = new_points[status == 1].reshape(-1, 2)
+    if len(old) < 8:
+        return 0.0
+    return float(np.median(np.linalg.norm(new - old, axis=1)))
+
+
 def estimate_delta_angles(previous_frame: np.ndarray, frame: np.ndarray) -> tuple[AngleTriplet, bool]:
+    if median_tracked_flow_px(previous_frame, frame) < MIN_TRACKED_FLOW_PX:
+        return (0.0, 0.0, 0.0), False
+
     try:
         _, _, _, roll, pitch, yaw = estimate_Rt(previous_frame, frame)
     except Exception:
@@ -498,7 +578,7 @@ def stream_loop(
     scheduler = CommandScheduler()
     previous_frame: np.ndarray | None = None
     frame_index = 0
-    estimated_angles: AngleTriplet | None = None
+    integrator = AngleIntegrator()
 
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 
@@ -521,14 +601,13 @@ def stream_loop(
             break
 
         true_angles, _, _, _, _ = orientation.snapshot()
-        if estimated_angles is None:
-            estimated_angles = true_angles
-            orientation.update_estimate(estimated_angles, (0.0, 0.0, 0.0), False)
+        if integrator.estimate is None:
+            integrator.reset(true_angles)
+            orientation.update_estimate(true_angles, (0.0, 0.0, 0.0), False)
 
         if previous_frame is not None and frame_index % ANGLE_ESTIMATE_EVERY_N_FRAMES == 0:
-            delta_angles, estimate_ok = estimate_delta_angles(previous_frame, raw_frame)
-            if estimate_ok:
-                estimated_angles = add_angles(estimated_angles, delta_angles)
+            raw_delta_angles, estimate_ok = estimate_delta_angles(previous_frame, raw_frame)
+            estimated_angles, delta_angles, estimate_ok = integrator.update(raw_delta_angles, estimate_ok)
             orientation.update_estimate(estimated_angles, delta_angles, estimate_ok)
         else:
             _, current_estimated, current_delta, current_ok, _ = orientation.snapshot()

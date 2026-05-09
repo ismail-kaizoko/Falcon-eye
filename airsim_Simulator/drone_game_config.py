@@ -15,6 +15,14 @@ SAVE_ANGLE_PLOTS = True
 ANGLE_PLOT_DIR = "data/drone_game_plots"
 ANGLE_ESTIMATE_EVERY_N_FRAMES = 1
 
+# Visual angle estimation filters. Essential-matrix pose is noisy when the
+# frame-to-frame motion is tiny, so reject near-static/noisy deltas before
+# integrating them.
+MIN_TRACKED_FLOW_PX = 0.35
+ANGLE_DEADBAND_DEG = 0.15
+MAX_ABS_DELTA_ANGLE_DEG = 8.0
+ANGLE_SMOOTHING_ALPHA = 0.35
+
 # Control loop.
 COMMAND_HZ = 4.0
 COMMAND_DURATION_SECONDS = 0.35

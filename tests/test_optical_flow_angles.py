@@ -84,3 +84,16 @@ def test_lucas_kanade_rejects_none_frames(module_name):
 
     with pytest.raises(ValueError, match="valid images"):
         module.Lucas_Kanade(None, None)
+
+
+@pytest.mark.parametrize("module_name", MODULE_NAMES)
+def test_estimate_rt_returns_zero_for_identical_feature_rich_frames(module_name):
+    module = importlib.import_module(module_name)
+    frame = np.zeros((160, 220, 3), dtype=np.uint8)
+    for y in range(20, 150, 30):
+        for x in range(20, 210, 30):
+            frame[y - 2 : y + 3, x - 2 : x + 3] = 255
+
+    recovered = module.estimate_Rt(frame, frame.copy())
+
+    assert np.allclose(recovered, np.zeros(6), atol=1e-9)
