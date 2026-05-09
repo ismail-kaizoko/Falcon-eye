@@ -501,6 +501,18 @@ def format_angles(angles: AngleTriplet) -> str:
     return f"yaw {yaw:7.2f}  pitch {pitch:7.2f}  roll {roll:7.2f}"
 
 
+def print_initial_angles(initial_angles: AngleTriplet) -> None:
+    roll, pitch, yaw = initial_angles
+    print(
+        "Initial simulator angles angles_0 (deg): "
+        f"yaw={yaw:.3f}, pitch={pitch:.3f}, roll={roll:.3f}"
+    )
+    print(
+        "Internal angle order (roll, pitch, yaw) deg: "
+        f"({roll:.3f}, {pitch:.3f}, {yaw:.3f})"
+    )
+
+
 def draw_overlay(frame: np.ndarray, fps: float, keys: Set[str], orientation: OrientationState) -> None:
     if not DISPLAY_STATUS_OVERLAY:
         return
@@ -568,6 +580,7 @@ def stream_loop(
     keys: KeyboardState,
     orientation: OrientationState,
     history: AngleHistory,
+    initial_angles: AngleTriplet,
     stop_event: threading.Event,
 ) -> None:
     image_type = airsim_image_type()
@@ -579,6 +592,8 @@ def stream_loop(
     previous_frame: np.ndarray | None = None
     frame_index = 0
     integrator = AngleIntegrator()
+    integrator.reset(initial_angles)
+    orientation.update_estimate(initial_angles, (0.0, 0.0, 0.0), False)
 
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 
@@ -599,11 +614,6 @@ def stream_loop(
         if stop_requested:
             stop_event.set()
             break
-
-        true_angles, _, _, _, _ = orientation.snapshot()
-        if integrator.estimate is None:
-            integrator.reset(true_angles)
-            orientation.update_estimate(true_angles, (0.0, 0.0, 0.0), False)
 
         if previous_frame is not None and frame_index % ANGLE_ESTIMATE_EVERY_N_FRAMES == 0:
             raw_delta_angles, estimate_ok = estimate_delta_angles(previous_frame, raw_frame)
@@ -651,7 +661,10 @@ def main() -> None:
     camera_client = make_client()
     telemetry_client = make_client()
     setup_drone(control_client)
-    orientation.update_true(true_angles_from_state(telemetry_client))
+    initial_angles = true_angles_from_state(telemetry_client)
+    orientation.update_true(initial_angles)
+    orientation.update_estimate(initial_angles, (0.0, 0.0, 0.0), False)
+    print_initial_angles(initial_angles)
 
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
     listener.start()
@@ -665,7 +678,7 @@ def main() -> None:
 
     saved_plots: list[str] = []
     try:
-        stream_loop(control_client, camera_client, keys, orientation, history, stop_event)
+        stream_loop(control_client, camera_client, keys, orientation, history, initial_angles, stop_event)
     finally:
         stop_event.set()
         telemetry_worker.join(timeout=2.0)
