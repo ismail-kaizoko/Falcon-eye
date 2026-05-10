@@ -117,9 +117,19 @@ def estimate_Rt(frame1, frame2):
         raise ValueError("not enough inliers to recover pose")
 
     # --- Recover pose (R, t direction) ---
-    _, R, t, mask_pose = cv2.recoverPose(E, inliers1, inliers2, K)
+    _, R_camera, t, mask_pose = cv2.recoverPose(E, inliers1, inliers2, K)
 
-    euler_angles = rotation_to_euler(R)
+    #align camera frame to drone frame convention 
+    Permute = np.array([
+    [0,0,1],
+    [1,0,0],
+    [0,1,0]
+])
+    R_drone = Permute @ R_camera @ Permute.T
+
+
+
+    euler_angles = rotation_to_euler(R_drone)
     return t[0][0], t[1][0], t[2][0], euler_angles[0], euler_angles[1], euler_angles[2]
 
 
@@ -139,4 +149,4 @@ def rotation_to_euler(R):
         pitch = np.arctan2(-R[2,0], sy)
         yaw   = 0
 
-    return np.degrees([roll, pitch, yaw])
+    return -np.degrees([roll, pitch, yaw])
