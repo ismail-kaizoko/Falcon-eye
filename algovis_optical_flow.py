@@ -65,7 +65,7 @@ for i in range(len(frames)-1):
 
     cv2.arrowedLine(img, (cx, cy), (end_x, end_y), (0,255,0), 3)
 
-    text = f"Roll: {np.degrees(roll):.1f} | Pitch: {np.degrees(pitch):.1f} | Yaw: {np.degrees(yaw):.1f}"
+    text = f"Roll: {roll:.1f} | Pitch: {pitch:.1f} | Yaw: {yaw:.1f}"
 
     cv2.putText(img, text, (20,40),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)

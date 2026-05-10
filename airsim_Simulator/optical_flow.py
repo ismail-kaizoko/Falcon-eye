@@ -91,7 +91,7 @@ def estimate_Rt(frame1, frame2):
 
 
     # --- Fake camera intrinsics ---
-    f = w
+    f = w / (2*np.tan(np.radians(90/2)))
     K = np.array([
         [f, 0, w/2],
         [0, f, h/2],
