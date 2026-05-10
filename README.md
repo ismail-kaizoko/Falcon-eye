@@ -1,4 +1,4 @@
-# Falcon-EYE 🧿
+# Falcon-EYE 🦅
 
 Falcon-EYE is a personal project focused on implementing core algorithms for
 vision-based navigation, tracking, and simulation in UAV (drone) systems.
