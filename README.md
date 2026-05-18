@@ -3,29 +3,27 @@
 Falcon-EYE is a personal project focused on implementing core algorithms for
 vision-based navigation, tracking, and simulation in UAV (drone) systems.
 
-
 ---
 
 ## Implemented Topics
 
-- **optical flow** : Lukas_Kanade algorithm to estimate local motion 
+- **optical flow** : Lukas_Kanade algorithm to estimate local motion
 - **Epipolar geometry and Essential matrix** : estimate (R,t) Rotation translation motion between two frames.
+- **VideoStream-Stablizer** : stabilize and filter the random transformations of the video taken from the drone.
+
 ---
 
-##  Simulation Environment
+## Simulation Environment
 
 All algorithms are tested inside **AirSim**, a high-fidelity drone simulator from Microsoft.
 
 This branch also includes an interactive AirSim drone game mode with keyboard
 movement and a live camera window. See `docs/DRONE_GAME.md`.
 
-
-
 ### 1. Install Unreal Engine
 
 Download Unreal Engine (recommended 4.27):
 https://www.unrealengine.com/
-
 
 ### 2. Run AirSim (fastest method)
 
@@ -37,17 +35,17 @@ Instead of building AirSim, you can use a prebuilt environment:
 
 This launches a ready-to-use 3D simulation with a drone.
 
+clone The AirsSim repository from microsoft repo :
 
-clone The AirsSim repository from microsoft repo : 
 ```bash
 git clone https://github.com/microsoft/AirSim.git
-cd AirSim/PythonClient/multirotor 
+cd AirSim/PythonClient/multirotor
 python hello_drone.py
 ```
 
-
 ## Clone and Setup
-AirSim dependencies may conflict with your system packages, we recommend using python env : 
+
+AirSim dependencies may conflict with your system packages, we recommend using python env :
 
 ```bash
 git clone <repo>
